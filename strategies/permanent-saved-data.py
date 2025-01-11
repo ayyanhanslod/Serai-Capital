@@ -182,7 +182,7 @@ for ticker in TICKERS:
             ticker,
             multiplier=1,
             timespan="minute",
-            from_date="2020-01-01",
+            from_date="2024-12-30",
             to_date="2024-12-31",
         )
         data = add_indicators(data)
