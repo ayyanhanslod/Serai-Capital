@@ -12,7 +12,7 @@ import xlsxwriter
 # Parameters
 API_KEY = "CTHBeNv4eb4B9eGOaDjXifsbeTV4kU4B"  # Replace with your Polygon.io API key
 DATA_FOLDER = "saved_data"  # Folder to save fetched data
-TICKERS = ["MARA", "PLTR", "TSLA", "NVDA", "SOUN"]  # List of stocks to backtest
+TICKERS = ["PLTR"]  # List of stocks to backtest
 TRANSACTION_COST = 0.0035  # Commission per share
 STOP_LOSS_PERCENT = 3 / 100  # Stop-loss threshold as 3%
 INITIAL_BALANCE = 1000  # Starting balance in USD
@@ -85,8 +85,8 @@ def fetch_polygon_data_chunked(ticker, multiplier, timespan, from_date, to_date)
 
 # Add technical indicators
 def add_indicators(data):
-    data["EMA5"] = EMAIndicator(data["Close"], window=9).ema_indicator()
-    data["EMA15"] = EMAIndicator(data["Close"], window=21).ema_indicator()
+    data["EMA9"] = EMAIndicator(data["Close"], window=9).ema_indicator()
+    data["EMA21"] = EMAIndicator(data["Close"], window=21).ema_indicator()
     data["RSI"] = RSIIndicator(data["Close"], window=14).rsi()
 
     macd = MACD(data["Close"])
@@ -99,7 +99,7 @@ def add_indicators(data):
 # Backtest the strategy
 def backtest_strategy(ticker, data, stop_loss_percent):
     data["Target"] = np.where(data["Close"].shift(-5) > data["Close"], 1, 0)
-    features = ["EMA5", "EMA15", "RSI", "MACD", "MACD_Signal", "MACD_Hist"]
+    features = ["EMA9", "EMA21", "RSI", "MACD", "MACD_Signal", "MACD_Hist"]
     X = data[features]
     y = data["Target"]
 
@@ -182,7 +182,7 @@ for ticker in TICKERS:
             ticker,
             multiplier=1,
             timespan="minute",
-            from_date="2024-12-30",
+            from_date="2024-09-01",
             to_date="2024-12-31",
         )
         data = add_indicators(data)
