@@ -4,19 +4,19 @@ from ta.trend import EMAIndicator, MACD
 from ta.momentum import RSIIndicator
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
-import matplotlib.pyplot as plt
+import os
 import requests
 
-# Define API Key and Parameters
+# Parameters
 API_KEY = "CTHBeNv4eb4B9eGOaDjXifsbeTV4kU4B"  # Replace with your Polygon.io API key
-TICKER = "MARA"
+TICKERS = ["MARA", "PLTR", "TSLA", "NVDA", "SOUN"]  # List of stocks to backtest
+TRANSACTION_COST = 0.0035  # Commission per share
+STOP_LOSS_PERCENT = 3 / 100  # Stop-loss threshold as 3%
 INITIAL_BALANCE = 1000  # Starting balance in USD
-STOP_LOSS_PERCENT = 0.5 / 100  # Stop-loss threshold as 0.5%
-print("Starting Balance: " + str(INITIAL_BALANCE))
+RESULTS_FILE = "backtest_results.xlsx"  # Output Excel file for results
 
 
-# Step 1: Fetch Historical Data
+# Function to fetch data from Polygon.io
 def fetch_polygon_data(ticker, multiplier, timespan, from_date, to_date):
     url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
     params = {"apiKey": API_KEY}
@@ -25,11 +25,8 @@ def fetch_polygon_data(ticker, multiplier, timespan, from_date, to_date):
         data = response.json()
         if "results" in data:
             df = pd.DataFrame(data["results"])
-            # Format the data
-            df["timestamp"] = pd.to_datetime(
-                df["t"], unit="ms"
-            )  # Convert UNIX time to datetime
-            df.set_index("timestamp", inplace=True)  # Set timestamp as the index
+            df["timestamp"] = pd.to_datetime(df["t"], unit="ms")
+            df.set_index("timestamp", inplace=True)
             df.rename(
                 columns={
                     "o": "Open",
@@ -49,125 +46,152 @@ def fetch_polygon_data(ticker, multiplier, timespan, from_date, to_date):
         )
 
 
-from_date = "2024-10-01"
-to_date = "2024-12-31"
-data = fetch_polygon_data(
-    TICKER, multiplier=1, timespan="minute", from_date=from_date, to_date=to_date
-)
-data.dropna(inplace=True)
+# Function to read or fetch data
+def get_data(ticker, from_date, to_date):
+    from_date = pd.to_datetime(from_date)
+    to_date = pd.to_datetime(to_date)
 
-# Step 2: Add Technical Indicators
-data["EMA9"] = EMAIndicator(data["Close"], window=9).ema_indicator()
-data["EMA21"] = EMAIndicator(data["Close"], window=21).ema_indicator()
-data["RSI"] = RSIIndicator(data["Close"], window=14).rsi()
-
-# Add MACD Indicator
-macd = MACD(data["Close"])
-data["MACD"] = macd.macd()
-data["MACD_Signal"] = macd.macd_signal()
-data["MACD_Hist"] = macd.macd_diff()
-
-data.dropna(inplace=True)
-
-# Step 3: Prepare Features for Machine Learning
-data["Target"] = np.where(data["Close"].shift(-5) > data["Close"], 1, 0)
-
-features = ["EMA9", "EMA21", "RSI", "MACD", "MACD_Signal", "MACD_Hist"]
-X = data[features]
-y = data["Target"]
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42
-)
-
-# Step 4: Train Machine Learning Model
-model = RandomForestClassifier(n_estimators=100, random_state=42)
-model.fit(X_train, y_train)
-
-y_pred = model.predict(X_test)
-print(classification_report(y_test, y_pred))
-
-# Step 5: Simulate Paper Trading with Stop-Loss
-balance = INITIAL_BALANCE
-shares_held = 0
-entry_price = None  # Track entry price for stop-loss
-trade_log = []
-transactions_count = 0
-
-data["Prediction"] = model.predict(X)
-
-for index, row in data.iterrows():
-    price = row["Close"]
-
-    # Stop-Loss Condition
-    if shares_held > 0 and price <= entry_price * (1 - STOP_LOSS_PERCENT):
-        revenue = shares_held * price
-        balance += revenue
-        transactions_count += 1
-        trade_log.append((index, "STOP-LOSS SELL", shares_held, price, balance))
-        shares_held = 0
-        entry_price = None  # Reset entry price
-
-    # Buy Signal
-    elif row["Prediction"] == 1 and balance > 0:
-        shares_to_buy = balance // price
-        if shares_to_buy > 0:
-            cost = shares_to_buy * price
-            balance -= cost
-            shares_held += shares_to_buy
-            entry_price = price  # Set entry price for stop-loss tracking
-            transactions_count += 1
-            trade_log.append((index, "BUY", shares_to_buy, price, balance))
-
-    # Sell Signal
-    elif row["Prediction"] == 0 and shares_held > 0:
-        revenue = shares_held * price
-        balance += revenue
-        transactions_count += 1
-        trade_log.append((index, "SELL", shares_held, price, balance))
-        shares_held = 0
-        entry_price = None  # Reset entry price
-
-# Step 6: Print Trade Log and Results
-for trade in trade_log:
-    print(
-        f"{trade[0]}: {trade[1]} {trade[2]} shares at ${trade[3]:.2f}, Balance: ${trade[4]:.2f}"
+    # Fetch the data directly from Polygon if it is not available in saved files
+    print(f"Fetching data for {ticker} from Polygon.io...")
+    data = fetch_polygon_data(
+        ticker,
+        multiplier=1,
+        timespan="minute",
+        from_date=from_date.strftime("%Y-%m-%d"),
+        to_date=to_date.strftime("%Y-%m-%d"),
     )
 
-final_balance = balance + (shares_held * data.iloc[-1]["Close"])
-print(f"Final Balance: ${final_balance:.2f}")
-print(f"Net Profit: ${final_balance - INITIAL_BALANCE:.2f}")
-print(f"Total Transactions: {transactions_count}")
+    return data
 
-# Step 7: Plot Results
-plt.figure(figsize=(14, 8))
-plt.plot(data.index, data["Close"], label="Close Price", color="blue")
-plt.plot(data.index, data["EMA9"], label="EMA9", color="green", linestyle="--")
-plt.plot(data.index, data["EMA21"], label="EMA21", color="red", linestyle="--")
 
-# Plot Buy and Sell Signals
-buy_signals = data[data["Prediction"] == 1]
-sell_signals = data[data["Prediction"] == 0]
-plt.scatter(
-    buy_signals.index,
-    buy_signals["Close"],
-    label="Buy Signal",
-    marker="^",
-    color="green",
-    alpha=1,
+# Add technical indicators
+def add_indicators(data):
+    data["EMA5"] = EMAIndicator(data["Close"], window=9).ema_indicator()
+    data["EMA15"] = EMAIndicator(data["Close"], window=21).ema_indicator()
+    data["RSI"] = RSIIndicator(data["Close"], window=14).rsi()
+
+    macd = MACD(data["Close"])
+    data["MACD"] = macd.macd()
+    data["MACD_Signal"] = macd.macd_signal()
+    data["MACD_Hist"] = macd.macd_diff()
+    return data.dropna()
+
+
+# Backtest the strategy
+def backtest_strategy(ticker, data, stop_loss_percent):
+    # Prepare features and target
+    data["Target"] = np.where(data["Close"].shift(-5) > data["Close"], 1, 0)
+    features = ["EMA5", "EMA15", "RSI", "MACD", "MACD_Signal", "MACD_Hist"]
+    X = data[features]
+    y = data["Target"]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+
+    # Simulate trading
+    balance = INITIAL_BALANCE
+    shares_held = 0
+    entry_price = None
+    trade_log = []
+    data["Prediction"] = model.predict(X)
+
+    for index, row in data.iterrows():
+        price = row["Close"]
+
+        # Ensure price is valid (non-zero)
+        if price <= 0:
+            continue
+
+        # Stop-Loss Condition
+        if shares_held > 0 and price <= entry_price * (1 - stop_loss_percent):
+            revenue = shares_held * price
+            commission = shares_held * TRANSACTION_COST
+            balance += revenue - commission
+            trade_log.append((index, "STOP-LOSS SELL", shares_held, price, balance))
+            shares_held = 0
+            entry_price = None
+
+        # Buy Signal
+        elif row["Prediction"] == 1 and balance > 0:
+            shares_to_buy = int(balance // (price + TRANSACTION_COST))
+            if shares_to_buy > 0:
+                cost = shares_to_buy * price
+                commission = shares_to_buy * TRANSACTION_COST
+                balance -= cost + commission
+                shares_held += shares_to_buy
+                entry_price = price
+                trade_log.append((index, "BUY", shares_to_buy, price, balance))
+
+        # Sell Signal
+        elif row["Prediction"] == 0 and shares_held > 0:
+            revenue = shares_held * price
+            commission = shares_held * TRANSACTION_COST
+            balance += revenue - commission
+            trade_log.append((index, "SELL", shares_held, price, balance))
+            shares_held = 0
+            entry_price = None
+
+    final_balance = balance + (shares_held * data.iloc[-1]["Close"])
+    net_profit = final_balance - INITIAL_BALANCE
+    win_rate = (
+        sum([1 for t in trade_log if "SELL" in t[1] and t[2] > 0]) / len(trade_log)
+        if trade_log
+        else 0
+    )
+
+    trade_log_df = pd.DataFrame(
+        trade_log, columns=["Date", "Action", "Shares", "Price", "Balance"]
+    )
+
+    return {
+        "Ticker": ticker,
+        "Net Profit": net_profit,
+        "Final Balance": final_balance,
+        "Win Rate": win_rate,
+        "Total Trades": len(trade_log),
+        "Trade Log": trade_log_df,
+    }
+
+
+# Run the backtest for multiple stocks and save results
+results = []
+writer = pd.ExcelWriter(RESULTS_FILE, engine="xlsxwriter")
+
+for ticker in TICKERS:
+    try:
+        print(f"Processing {ticker}...")
+        data = get_data(
+            ticker,
+            from_date="2024-12-30",
+            to_date="2024-12-31",
+        )
+        data = add_indicators(data)
+        result = backtest_strategy(ticker, data, STOP_LOSS_PERCENT)
+        results.append(result)
+
+        # Save trade log to a separate sheet
+        result["Trade Log"].to_excel(writer, sheet_name=f"{ticker}_Log", index=False)
+
+    except Exception as e:
+        print(f"Error with {ticker}: {e}")
+
+# Save summary results
+summary_df = pd.DataFrame(
+    [
+        {
+            "Ticker": r["Ticker"],
+            "Net Profit": r["Net Profit"],
+            "Final Balance": r["Final Balance"],
+            "Win Rate": r["Win Rate"],
+            "Total Trades": r["Total Trades"],
+        }
+        for r in results
+    ]
 )
-plt.scatter(
-    sell_signals.index,
-    sell_signals["Close"],
-    label="Sell Signal",
-    marker="v",
-    color="red",
-    alpha=1,
-)
+summary_df.to_excel(writer, sheet_name="Summary", index=False)
 
-plt.title(f"Scalping Strategy with ML, MACD, and Stop-Loss for {TICKER}")
-plt.xlabel("Date")
-plt.ylabel("Price")
-plt.legend()
-plt.grid()
-plt.show()
+writer.close()
+print(f"Backtesting results saved to {RESULTS_FILE}.")
