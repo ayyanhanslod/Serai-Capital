@@ -30,15 +30,11 @@ os.makedirs(DATA_FOLDER, exist_ok=True)
 
 # Fetch data in chunks
 def fetch_polygon_data_chunked(ticker, from_date, to_date):
-    # Construct file path for saved data
     file_path = os.path.join(DATA_FOLDER, f"{ticker}_{from_date}_{to_date}.csv")
-
-    # Check if data already exists
     if os.path.exists(file_path):
         print(f"Loading data for {ticker} from {file_path}...")
         return pd.read_csv(file_path, parse_dates=["timestamp"], index_col="timestamp")
 
-    # If data does not exist, fetch in chunks
     print(f"Fetching data for {ticker} from {from_date} to {to_date}...")
     start_date = datetime.strptime(from_date, "%Y-%m-%d")
     end_date = datetime.strptime(to_date, "%Y-%m-%d")
@@ -79,7 +75,6 @@ def fetch_polygon_data_chunked(ticker, from_date, to_date):
 
         start_date = chunk_end_date + timedelta(days=1)
 
-    # Concatenate all chunks
     if all_data:
         final_data = pd.concat(all_data)
         final_data.to_csv(file_path)
@@ -110,12 +105,10 @@ def train_model(data):
     X = data[features]
     y = data["Target"]
 
-    # Split the data into training and testing sets (80% train, 20% test)
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42
     )
 
-    # Train a Random Forest model
     model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X_train, y_train)
 
@@ -136,7 +129,6 @@ def backtest_strategy(ticker, data, stop_loss_percent, model):
 
     for index, row in data.iterrows():
         price = row["Close"]
-
         if price <= 0:
             continue
 
@@ -198,7 +190,6 @@ for ticker in TICKERS:
     try:
         print(f"Processing {ticker}...")
 
-        # Fetch training data and add indicators
         train_data = fetch_polygon_data_chunked(
             ticker,
             from_date=TRAIN_START_DATE,
@@ -206,10 +197,8 @@ for ticker in TICKERS:
         )
         train_data = add_indicators(train_data)
 
-        # Train the model on the training data
         model = train_model(train_data)
 
-        # Fetch test data and add indicators
         test_data = fetch_polygon_data_chunked(
             ticker,
             from_date=TEST_START_DATE,
@@ -217,7 +206,6 @@ for ticker in TICKERS:
         )
         test_data = add_indicators(test_data)
 
-        # Run the backtest using the trained model
         result = backtest_strategy(ticker, test_data, STOP_LOSS_PERCENT, model)
         results.append(result)
 

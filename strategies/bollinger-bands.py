@@ -3,8 +3,9 @@ import pandas as pd
 import numpy as np
 from ta.trend import EMAIndicator, MACD
 from ta.momentum import RSIIndicator
+from ta.volatility import BollingerBands
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split
 import requests
 from datetime import datetime, timedelta
 import xlsxwriter
@@ -84,56 +85,67 @@ def fetch_polygon_data_chunked(ticker, from_date, to_date):
         raise ValueError(f"No data retrieved for {ticker} in the given date range.")
 
 
-# Add technical indicators with adjusted parameters
+# Add technical indicators
 def add_indicators(data):
     data["EMA9"] = EMAIndicator(data["Close"], window=9).ema_indicator()
     data["EMA21"] = EMAIndicator(data["Close"], window=21).ema_indicator()
     data["RSI"] = RSIIndicator(data["Close"], window=14).rsi()
 
-    macd = MACD(
-        data["Close"], window_slow=26, window_fast=12, window_sign=9
-    )  # Custom MACD periods
+    macd = MACD(data["Close"])
     data["MACD"] = macd.macd()
     data["MACD_Signal"] = macd.macd_signal()
     data["MACD_Hist"] = macd.macd_diff()
+
+    bb = BollingerBands(close=data["Close"], window=20, window_dev=2)
+    data["BB_Middle"] = bb.bollinger_mavg()
+    data["BB_Upper"] = bb.bollinger_hband()
+    data["BB_Lower"] = bb.bollinger_lband()
+
     return data.dropna()
 
 
-# Train a machine learning model with hyperparameter tuning
+# Train a machine learning model
 def train_model(data):
     data["Target"] = np.where(data["Close"].shift(-5) > data["Close"], 1, 0)
 
-    features = ["EMA9", "EMA21", "RSI", "MACD", "MACD_Signal", "MACD_Hist"]
+    features = [
+        "EMA9",
+        "EMA21",
+        "RSI",
+        "MACD",
+        "MACD_Signal",
+        "MACD_Hist",
+        "BB_Middle",
+        "BB_Upper",
+        "BB_Lower",
+    ]
     X = data[features]
     y = data["Target"]
 
-    # Split the data into training and testing sets (80% train, 20% test)
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42
     )
 
-    # Hyperparameter tuning for Random Forest using GridSearchCV
-    param_grid = {
-        "n_estimators": [50, 100, 150],
-        "max_depth": [10, 20, None],
-        "min_samples_split": [2, 5, 10],
-        "min_samples_leaf": [1, 2, 4],
-    }
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
 
-    grid_search = GridSearchCV(
-        RandomForestClassifier(random_state=42), param_grid, cv=5, n_jobs=-1, verbose=1
-    )
-    grid_search.fit(X_train, y_train)
-
-    best_model = grid_search.best_estimator_
-    print(f"Best Model: {grid_search.best_params_}")
-    print(f"Model Accuracy: {best_model.score(X_test, y_test):.4f}")
-    return best_model
+    print(f"Model Accuracy: {model.score(X_test, y_test):.4f}")
+    return model
 
 
 # Backtest the strategy using predictions
 def backtest_strategy(ticker, data, stop_loss_percent, model):
-    features = ["EMA9", "EMA21", "RSI", "MACD", "MACD_Signal", "MACD_Hist"]
+    features = [
+        "EMA9",
+        "EMA21",
+        "RSI",
+        "MACD",
+        "MACD_Signal",
+        "MACD_Hist",
+        "BB_Middle",
+        "BB_Upper",
+        "BB_Lower",
+    ]
     X = data[features]
     data["Prediction"] = model.predict(X)
 
@@ -144,6 +156,7 @@ def backtest_strategy(ticker, data, stop_loss_percent, model):
 
     for index, row in data.iterrows():
         price = row["Close"]
+
         if price <= 0:
             continue
 
@@ -242,6 +255,6 @@ summary_df = pd.DataFrame(
     ]
 )
 summary_df.to_excel(writer, sheet_name="Summary", index=False)
-
 writer.close()
-print(f"Backtesting results saved to {excel_file}.")
+
+print(f"Results saved to {excel_file}")
