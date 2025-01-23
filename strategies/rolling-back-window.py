@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 from ta.trend import EMAIndicator, MACD
 from ta.momentum import RSIIndicator
-from ta.volatility import BollingerBands
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 import requests
@@ -31,11 +30,15 @@ os.makedirs(DATA_FOLDER, exist_ok=True)
 
 # Fetch data in chunks
 def fetch_polygon_data_chunked(ticker, from_date, to_date):
+    # Construct file path for saved data
     file_path = os.path.join(DATA_FOLDER, f"{ticker}_{from_date}_{to_date}.csv")
+
+    # Check if data already exists
     if os.path.exists(file_path):
         print(f"Loading data for {ticker} from {file_path}...")
         return pd.read_csv(file_path, parse_dates=["timestamp"], index_col="timestamp")
 
+    # If data does not exist, fetch in chunks
     print(f"Fetching data for {ticker} from {from_date} to {to_date}...")
     start_date = datetime.strptime(from_date, "%Y-%m-%d")
     end_date = datetime.strptime(to_date, "%Y-%m-%d")
@@ -52,7 +55,7 @@ def fetch_polygon_data_chunked(ticker, from_date, to_date):
 
         if response.status_code == 200:
             data = response.json()
-            if "results" in data:
+            if "results" in data and data["results"]:
                 df = pd.DataFrame(data["results"])
                 df["timestamp"] = pd.to_datetime(df["t"], unit="ms")
                 df.set_index("timestamp", inplace=True)
@@ -70,19 +73,19 @@ def fetch_polygon_data_chunked(ticker, from_date, to_date):
             else:
                 print(f"No data found for {ticker} from {chunk_from} to {chunk_to}.")
         else:
-            raise ValueError(
-                f"Error fetching data: {response.status_code}, {response.text}"
-            )
+            print(f"Error fetching data: {response.status_code}, {response.text}")
 
         start_date = chunk_end_date + timedelta(days=1)
 
+    # Concatenate all chunks if they exist
     if all_data:
         final_data = pd.concat(all_data)
         final_data.to_csv(file_path)
         print(f"Data for {ticker} saved to {file_path}.")
         return final_data
     else:
-        raise ValueError(f"No data retrieved for {ticker} in the given date range.")
+        print(f"No data retrieved for {ticker} in the given date range.")
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
 
 # Add technical indicators
@@ -95,12 +98,6 @@ def add_indicators(data):
     data["MACD"] = macd.macd()
     data["MACD_Signal"] = macd.macd_signal()
     data["MACD_Hist"] = macd.macd_diff()
-
-    bb = BollingerBands(close=data["Close"], window=20, window_dev=2)
-    data["BB_Middle"] = bb.bollinger_mavg()
-    data["BB_Upper"] = bb.bollinger_hband()
-    data["BB_Lower"] = bb.bollinger_lband()
-
     return data.dropna()
 
 
@@ -108,24 +105,16 @@ def add_indicators(data):
 def train_model(data):
     data["Target"] = np.where(data["Close"].shift(-5) > data["Close"], 1, 0)
 
-    features = [
-        "EMA9",
-        "EMA21",
-        "RSI",
-        "MACD",
-        "MACD_Signal",
-        "MACD_Hist",
-        "BB_Middle",
-        "BB_Upper",
-        "BB_Lower",
-    ]
+    features = ["EMA9", "EMA21", "RSI", "MACD", "MACD_Signal", "MACD_Hist"]
     X = data[features]
     y = data["Target"]
 
+    # Split the data into training and testing sets (80% train, 20% test)
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42
     )
 
+    # Train a Random Forest model
     model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X_train, y_train)
 
@@ -135,17 +124,7 @@ def train_model(data):
 
 # Backtest the strategy using predictions
 def backtest_strategy(ticker, data, stop_loss_percent, model):
-    features = [
-        "EMA9",
-        "EMA21",
-        "RSI",
-        "MACD",
-        "MACD_Signal",
-        "MACD_Hist",
-        "BB_Middle",
-        "BB_Upper",
-        "BB_Lower",
-    ]
+    features = ["EMA9", "EMA21", "RSI", "MACD", "MACD_Signal", "MACD_Hist"]
     X = data[features]
     data["Prediction"] = model.predict(X)
 
@@ -218,6 +197,7 @@ for ticker in TICKERS:
     try:
         print(f"Processing {ticker}...")
 
+        # Fetch training data and add indicators
         train_data = fetch_polygon_data_chunked(
             ticker,
             from_date=TRAIN_START_DATE,
@@ -225,8 +205,10 @@ for ticker in TICKERS:
         )
         train_data = add_indicators(train_data)
 
+        # Train the model on the training data
         model = train_model(train_data)
 
+        # Fetch test data and add indicators
         test_data = fetch_polygon_data_chunked(
             ticker,
             from_date=TEST_START_DATE,
@@ -234,6 +216,7 @@ for ticker in TICKERS:
         )
         test_data = add_indicators(test_data)
 
+        # Run the backtest using the trained model
         result = backtest_strategy(ticker, test_data, STOP_LOSS_PERCENT, model)
         results.append(result)
 
@@ -255,6 +238,6 @@ summary_df = pd.DataFrame(
     ]
 )
 summary_df.to_excel(writer, sheet_name="Summary", index=False)
-writer.close()
 
-print(f"Results saved to {excel_file}")
+writer.close()
+print(f"Backtesting results saved to {excel_file}.")
