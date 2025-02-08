@@ -4,7 +4,9 @@ import numpy as np
 from ta.trend import EMAIndicator, MACD
 from ta.momentum import RSIIndicator
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 import requests
 from datetime import datetime, timedelta
 import xlsxwriter
@@ -12,7 +14,7 @@ import xlsxwriter
 # Parameters
 API_KEY = "CTHBeNv4eb4B9eGOaDjXifsbeTV4kU4B"  # Replace with your Polygon.io API key
 DATA_FOLDER = "saved_data"  # Folder to save fetched data
-TICKERS = ["PLTR"]  # List of stocks to backtest
+TICKERS = ["NVDA"]  # List of stocks to backtest
 TRANSACTION_COST = 0.0035  # Commission per share
 STOP_LOSS_PERCENT = 3 / 100  # Stop-loss threshold as 3%
 INITIAL_BALANCE = 1000  # Starting balance in USD
@@ -94,6 +96,9 @@ def add_indicators(data):
     data["MACD"] = macd.macd()
     data["MACD_Signal"] = macd.macd_signal()
     data["MACD_Hist"] = macd.macd_diff()
+
+    data["Price_Change"] = data["Close"].pct_change() * 100
+    data["Volatility"] = (data["High"] - data["Low"]) / data["Close"] * 100
     return data.dropna()
 
 
@@ -101,7 +106,16 @@ def add_indicators(data):
 def train_model(data):
     data["Target"] = np.where(data["Close"].shift(-5) > data["Close"], 1, 0)
 
-    features = ["EMA9", "EMA21", "RSI", "MACD", "MACD_Signal", "MACD_Hist"]
+    features = [
+        "EMA9",
+        "EMA21",
+        "RSI",
+        "MACD",
+        "MACD_Signal",
+        "MACD_Hist",
+        "Price_Change",
+        "Volatility",
+    ]
     X = data[features]
     y = data["Target"]
 
@@ -109,16 +123,41 @@ def train_model(data):
         X, y, test_size=0.2, random_state=42
     )
 
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
+    pipeline = Pipeline(
+        [
+            ("scaler", StandardScaler()),
+            ("classifier", RandomForestClassifier(random_state=42)),
+        ]
+    )
 
-    print(f"Model Accuracy: {model.score(X_test, y_test):.4f}")
-    return model
+    param_grid = {
+        "classifier__n_estimators": [100, 200, 300],
+        "classifier__max_depth": [5, 10, None],
+        "classifier__min_samples_split": [2, 5, 10],
+    }
+
+    grid_search = GridSearchCV(pipeline, param_grid, cv=5, scoring="accuracy")
+    grid_search.fit(X_train, y_train)
+
+    print(f"Best Parameters: {grid_search.best_params_}")
+    print(f"Best Cross-Validation Accuracy: {grid_search.best_score_:.4f}")
+    print(f"Test Accuracy: {grid_search.score(X_test, y_test):.4f}")
+
+    return grid_search.best_estimator_
 
 
 # Backtest the strategy using predictions
 def backtest_strategy(ticker, data, stop_loss_percent, model):
-    features = ["EMA9", "EMA21", "RSI", "MACD", "MACD_Signal", "MACD_Hist"]
+    features = [
+        "EMA9",
+        "EMA21",
+        "RSI",
+        "MACD",
+        "MACD_Signal",
+        "MACD_Hist",
+        "Price_Change",
+        "Volatility",
+    ]
     X = data[features]
     data["Prediction"] = model.predict(X)
 
