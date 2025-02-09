@@ -33,10 +33,23 @@ os.makedirs(DATA_FOLDER, exist_ok=True)
 # DATA FETCHING FUNCTION
 # ======================
 def fetch_polygon_data(ticker, from_date, to_date):
-    file_path = os.path.join(DATA_FOLDER, f"{ticker}_{from_date}_{to_date}.xlsx")
-    if os.path.exists(file_path):
-        return pd.read_excel(file_path, parse_dates=["Date"], index_col="Date")
+    file_path = os.path.join(DATA_FOLDER, f"{ticker}_{from_date}_{to_date}.csv")
 
+    if os.path.exists(file_path):
+        print(f"Loading data from {file_path}...")
+        df = pd.read_csv(file_path)
+
+        # Debugging: Print column names to check if "Date" exists
+        print(f"Columns in CSV: {df.columns.tolist()}")
+
+        if "Date" not in df.columns:
+            raise ValueError(f"Missing 'Date' column in {file_path}")
+
+        df["Date"] = pd.to_datetime(df["Date"])
+        df.set_index("Date", inplace=True)
+        return df
+
+    print(f"Fetching new data for {ticker} from {from_date} to {to_date}...")
     start_date = datetime.strptime(from_date, "%Y-%m-%d")
     end_date = datetime.strptime(to_date, "%Y-%m-%d")
     all_data = []
@@ -68,7 +81,7 @@ def fetch_polygon_data(ticker, from_date, to_date):
 
     if all_data:
         final_data = pd.concat(all_data)
-        final_data.to_excel(file_path)
+        final_data.to_csv(file_path)
         return final_data
     return pd.DataFrame()
 
@@ -78,6 +91,7 @@ def fetch_polygon_data(ticker, from_date, to_date):
 # ======================
 def add_indicators(data):
     if data.empty:
+        print("No data available for indicators.")
         return data
 
     data = dropna(data)
