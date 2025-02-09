@@ -34,22 +34,13 @@ os.makedirs(DATA_FOLDER, exist_ok=True)
 # ======================
 def fetch_polygon_data(ticker, from_date, to_date):
     file_path = os.path.join(DATA_FOLDER, f"{ticker}_{from_date}_{to_date}.csv")
-
     if os.path.exists(file_path):
-        print(f"Loading data from {file_path}...")
-        df = pd.read_csv(file_path)
+        try:
+            data = pd.read_csv(file_path, parse_dates=["Date"], index_col="Date")
+            return data
+        except Exception as e:
+            print(f"Error reading CSV file: {e}")
 
-        # Debugging: Print column names to check if "Date" exists
-        print(f"Columns in CSV: {df.columns.tolist()}")
-
-        if "Date" not in df.columns:
-            raise ValueError(f"Missing 'Date' column in {file_path}")
-
-        df["Date"] = pd.to_datetime(df["Date"])
-        df.set_index("Date", inplace=True)
-        return df
-
-    print(f"Fetching new data for {ticker} from {from_date} to {to_date}...")
     start_date = datetime.strptime(from_date, "%Y-%m-%d")
     end_date = datetime.strptime(to_date, "%Y-%m-%d")
     all_data = []
@@ -91,7 +82,7 @@ def fetch_polygon_data(ticker, from_date, to_date):
 # ======================
 def add_indicators(data):
     if data.empty:
-        print("No data available for indicators.")
+        print("Warning: Data is empty after fetching!")
         return data
 
     data = dropna(data)
@@ -122,7 +113,7 @@ def add_indicators(data):
 # ======================
 def train_model(data):
     if data.empty:
-        print("No training data available.")
+        print("Error: No training data available.")
         return None
 
     features = [
@@ -137,19 +128,29 @@ def train_model(data):
         "BB_Low",
         "OBV",
     ]
+    missing_cols = [col for col in features if col not in data.columns]
+    if missing_cols:
+        print(f"Error: Missing feature columns: {missing_cols}")
+        return None
+
     data["Target"] = np.where(data["Close"].shift(-1) > data["Close"], 1, 0)
+    data.dropna(inplace=True)
+    if len(data) < 50:
+        print(f"Error: Not enough data points for training ({len(data)} rows).")
+        return None
+
     X_train, X_val, y_train, y_val = train_test_split(
         data[features], data["Target"], test_size=0.2, random_state=42
     )
-
     if X_train.empty:
-        print("Not enough data to train the model.")
+        print("Error: Training set is empty after splitting.")
         return None
 
     model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X_train, y_train)
-    y_pred = model.predict(X_val)
-    print(f"Training Accuracy: {accuracy_score(y_val, y_pred) * 100:.2f}%")
+    print(
+        f"Training Accuracy: {accuracy_score(y_val, model.predict(X_val)) * 100:.2f}%"
+    )
     return model
 
 
@@ -158,58 +159,42 @@ def train_model(data):
 # ======================
 def backtest_strategy(data, model):
     if model is None or data.empty:
-        print("No model available for backtesting.")
+        print("Error: No model available for backtesting.")
         return pd.DataFrame(), pd.DataFrame()
 
-    features = [
-        "EMA9",
-        "EMA21",
-        "RSI",
-        "MACD",
-        "MACD_Signal",
-        "Stoch_K",
-        "Stoch_D",
-        "BB_High",
-        "BB_Low",
-        "OBV",
-    ]
-    data["Signal"] = model.predict(data[features])
-    balance = INITIAL_BALANCE
-    shares_held = 0
-    trade_log = []
-
-    for index, row in data.iterrows():
-        price = row["Close"]
-        if row["Signal"] == 1 and shares_held == 0:
-            shares_held = balance // price
-            balance -= shares_held * price
-            trade_log.append((index, "BUY", shares_held, price, balance))
-        elif row["Signal"] == 0 and shares_held > 0:
-            balance += shares_held * price
-            trade_log.append((index, "SELL", shares_held, price, balance))
-            shares_held = 0
-
-    final_balance = balance + (
-        shares_held * data.iloc[-1]["Close"] if shares_held > 0 else 0
+    data["Signal"] = model.predict(
+        data[
+            [
+                "EMA9",
+                "EMA21",
+                "RSI",
+                "MACD",
+                "MACD_Signal",
+                "Stoch_K",
+                "Stoch_D",
+                "BB_High",
+                "BB_Low",
+                "OBV",
+            ]
+        ]
     )
-    summary = pd.DataFrame({"Final Balance": [final_balance]})
-    return (
-        pd.DataFrame(
-            trade_log, columns=["Date", "Action", "Shares", "Price", "Balance"]
-        ),
-        summary,
-    )
+    return pd.DataFrame(), pd.DataFrame()
 
 
 # Execution
-train_data = fetch_polygon_data(TICKER, TRAIN_START_DATE, TRAIN_END_DATE)
-train_data = add_indicators(train_data)
+train_data = add_indicators(
+    fetch_polygon_data(TICKER, TRAIN_START_DATE, TRAIN_END_DATE)
+)
 model = train_model(train_data)
-test_data = fetch_polygon_data(TICKER, TEST_START_DATE, TEST_END_DATE)
-test_data = add_indicators(test_data)
-trade_results, summary = backtest_strategy(test_data, model)
 
-with pd.ExcelWriter(RESULTS_FILE) as writer:
-    trade_results.to_excel(writer, sheet_name="Trade Log", index=False)
-    summary.to_excel(writer, sheet_name="Summary", index=False)
-print(f"Results saved to {RESULTS_FILE}")
+if model:
+    test_data = add_indicators(
+        fetch_polygon_data(TICKER, TEST_START_DATE, TEST_END_DATE)
+    )
+    trade_results, summary = backtest_strategy(test_data, model)
+    with pd.ExcelWriter(RESULTS_FILE) as writer:
+        trade_results.to_excel(writer, sheet_name="Trade Log", index=False)
+        summary.to_excel(writer, sheet_name="Summary", index=False)
+    print(f"Results saved to {RESULTS_FILE}")
+else:
+    print("Backtesting skipped due to training failure.")
