@@ -10,21 +10,22 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 import requests
 from datetime import datetime, timedelta
+import time
 
 # ======================
 # PARAMETERS & SETTINGS
 # ======================
-API_KEY = "CTHBeNv4eb4B9eGOaDjXifsbeTV4kU4B"
+API_KEY = "CTHBeNv4eb4B9eGOaDjXifsbeTV4kU4B"  # Replace with your Polygon API key
 DATA_FOLDER = "saved_data"
 RESULTS_FILE = "scalping_results.xlsx"
-TICKER = "MARA"
-TRAIN_START_DATE = "2023-01-01"
-TRAIN_END_DATE = "2023-12-31"
-TEST_START_DATE = "2024-01-01"
-TEST_END_DATE = "2024-01-31"
+TICKER = "MARA"  # Replace with a valid ticker symbol
+TRAIN_START_DATE = "2024-01-01"
+TRAIN_END_DATE = "2024-12-31"
+TEST_START_DATE = "2025-01-01"
+TEST_END_DATE = "2025-01-31"
 INITIAL_BALANCE = 1000  # Starting balance
 CHUNK_DAYS = 30  # Fetch intraday data in 30-day chunks
-TIMEFRAME = "1Min"  # Use 1-minute data for scalping
+TIMEFRAME = "minute"  # Use 1-minute data for scalping
 
 os.makedirs(DATA_FOLDER, exist_ok=True)
 
@@ -32,13 +33,14 @@ os.makedirs(DATA_FOLDER, exist_ok=True)
 # ======================
 # DATA FETCHING FUNCTION
 # ======================
-def fetch_polygon_data(ticker, from_date, to_date, timeframe="1Min"):
+def fetch_polygon_data(ticker, from_date, to_date, timeframe="minute"):
     file_path = os.path.join(
         DATA_FOLDER, f"{ticker}_{from_date}_{to_date}_{timeframe}.csv"
     )
     if os.path.exists(file_path):
         try:
             data = pd.read_csv(file_path, parse_dates=["Date"], index_col="Date")
+            print(f"Data loaded from {file_path}")
             return data
         except Exception as e:
             print(f"Error reading CSV file: {e}")
@@ -50,6 +52,7 @@ def fetch_polygon_data(ticker, from_date, to_date, timeframe="1Min"):
     while start_date < end_date:
         chunk_end_date = min(start_date + timedelta(days=CHUNK_DAYS - 1), end_date)
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/{timeframe}/{start_date.strftime('%Y-%m-%d')}/{chunk_end_date.strftime('%Y-%m-%d')}?apiKey={API_KEY}"
+        print(f"Fetching data from {start_date} to {chunk_end_date}...")
         response = requests.get(url)
 
         if response.status_code == 200:
@@ -69,13 +72,22 @@ def fetch_polygon_data(ticker, from_date, to_date, timeframe="1Min"):
                     inplace=True,
                 )
                 all_data.append(df[["Open", "High", "Low", "Close", "Volume"]])
+            else:
+                print(f"No results found for {start_date} to {chunk_end_date}.")
+        else:
+            print(f"Failed to fetch data: {response.status_code} - {response.text}")
 
         start_date = chunk_end_date + timedelta(days=1)
+        time.sleep(
+            12
+        )  # Add a delay to avoid hitting API rate limits (5 requests per minute)
 
     if all_data:
         final_data = pd.concat(all_data)
         final_data.to_csv(file_path)
+        print(f"Data saved to {file_path}")
         return final_data
+    print("No data fetched.")
     return pd.DataFrame()
 
 
@@ -181,10 +193,20 @@ def scalping_strategy(data, model, initial_balance=INITIAL_BALANCE):
 
     # Calculate summary metrics
     total_return = (balance - initial_balance) / initial_balance
-    win_rate = (
-        trade_logs_df[trade_logs_df["Action"] == "Sell"]["Price"]
-        > trade_logs_df[trade_logs_df["Action"] == "Buy"]["Price"]
-    ).mean()
+
+    # Calculate win rate by comparing buy and sell prices
+    win_count = 0
+    for i in range(1, len(trade_logs_df)):
+        if (
+            trade_logs_df["Action"].iloc[i] == "Sell"
+            and trade_logs_df["Action"].iloc[i - 1] == "Buy"
+        ):
+            if trade_logs_df["Price"].iloc[i] > trade_logs_df["Price"].iloc[i - 1]:
+                win_count += 1
+
+    total_trades = len(trade_logs_df) // 2
+    win_rate = win_count / total_trades if total_trades > 0 else 0
+
     max_drawdown = (data["Close"].cummax() - data["Close"]).max()
 
     summary = pd.DataFrame(
