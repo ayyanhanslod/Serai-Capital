@@ -24,7 +24,7 @@ TRAIN_END_DATE = "2024-12-31"
 TEST_START_DATE = "2025-01-01"
 TEST_END_DATE = "2025-01-31"
 INITIAL_BALANCE = 1000  # Starting balance
-CHUNK_DAYS = 30  # Fetch intraday data in 30-day chunks
+CHUNK_DAYS = 7  # Fetch intraday data in 30-day chunks
 TIMEFRAME = "minute"  # Use 1-minute data for scalping
 
 os.makedirs(DATA_FOLDER, exist_ok=True)
