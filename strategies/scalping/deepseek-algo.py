@@ -19,12 +19,12 @@ API_KEY = "CTHBeNv4eb4B9eGOaDjXifsbeTV4kU4B"  # Replace with your Polygon API ke
 DATA_FOLDER = "saved_data"
 RESULTS_FILE = "scalping_results.xlsx"
 TICKER = "MARA"  # Replace with a valid ticker symbol
-TRAIN_START_DATE = "2022-01-01"
+TRAIN_START_DATE = "2024-01-01"
 TRAIN_END_DATE = "2024-12-31"
 TEST_START_DATE = "2025-01-01"
-TEST_END_DATE = "2025-01-31"
+TEST_END_DATE = "2025-01-05"
 INITIAL_BALANCE = 1000  # Starting balance
-CHUNK_DAYS = 7  # Fetch intraday data in 30-day chunks
+CHUNK_DAYS = 30  # Fetch intraday data in 30-day chunks
 TIMEFRAME = "minute"  # Use 1-minute data for scalping
 
 os.makedirs(DATA_FOLDER, exist_ok=True)
