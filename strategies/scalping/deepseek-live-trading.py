@@ -11,6 +11,9 @@ from sklearn.metrics import accuracy_score
 import requests
 from datetime import datetime, timedelta
 import time
+import asyncio
+import websockets
+import json
 
 # ======================
 # PARAMETERS & SETTINGS
@@ -21,8 +24,6 @@ RESULTS_FILE = "scalping_results.xlsx"
 TICKER = "MARA"  # Replace with a valid ticker symbol
 TRAIN_START_DATE = "2024-01-01"
 TRAIN_END_DATE = "2024-12-31"
-TEST_START_DATE = "2025-01-01"
-TEST_END_DATE = "2025-01-20"
 INITIAL_BALANCE = 1000  # Starting balance
 CHUNK_DAYS = 30  # Fetch intraday data in 30-day chunks
 TIMEFRAME = "minute"  # Use 1-minute data for scalping
@@ -142,103 +143,107 @@ def train_model(data):
 
 
 # ======================
-# SCALPING STRATEGY
+# REAL-TIME TRADING WITH WEBSOCKET
 # ======================
-def scalping_strategy(data, model, initial_balance=INITIAL_BALANCE):
-    if data.empty or model is None:
-        print("Error: No data or model available for scalping.")
-        return pd.DataFrame(), pd.DataFrame()
+async def real_time_trading(model, ticker):
+    print("Checking for real-time trading signals...")
 
     # Initialize variables
-    balance = initial_balance
+    balance = INITIAL_BALANCE
     position = 0  # Current position (number of shares held)
     trade_logs = []  # List to store trade details
+    data = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
-    # Generate signals using the trained model
-    data["Signal"] = model.predict(data[["EMA5", "EMA9", "RSI", "VWAP"]])
+    # Connect to Polygon WebSocket
+    async with websockets.connect("wss://socket.polygon.io/stocks") as websocket:
+        # Authenticate with API key
+        await websocket.send(json.dumps({"action": "auth", "params": API_KEY}))
+        # Subscribe to the ticker
+        await websocket.send(
+            json.dumps({"action": "subscribe", "params": f"A.{ticker}"})
+        )
 
-    # Simulate trades
-    for i in range(1, len(data)):
-        if data["Signal"].iloc[i] == 1 and position == 0:  # Buy signal
-            buy_price = data["Close"].iloc[i]
-            shares_bought = balance // buy_price  # Use all available balance
-            if shares_bought > 0:
-                position = shares_bought
-                balance -= shares_bought * buy_price
-                trade_logs.append(
-                    {
-                        "Date": data.index[i],
-                        "Action": "Buy",
-                        "Price": buy_price,
-                        "Shares": shares_bought,
-                        "Balance": balance,
-                    }
-                )
-        elif data["Signal"].iloc[i] == 0 and position > 0:  # Sell signal
-            sell_price = data["Close"].iloc[i]
-            balance += position * sell_price
-            trade_logs.append(
-                {
-                    "Date": data.index[i],
-                    "Action": "Sell",
-                    "Price": sell_price,
-                    "Shares": position,
-                    "Balance": balance,
+        while True:
+            message = await websocket.recv()
+            data_json = json.loads(message)
+
+            # Process real-time data
+            if data_json[0]["ev"] == "A":  # Aggregate (minute) data
+                new_data = {
+                    "Date": datetime.fromtimestamp(data_json[0]["t"] / 1000),
+                    "Open": data_json[0]["o"],
+                    "High": data_json[0]["h"],
+                    "Low": data_json[0]["l"],
+                    "Close": data_json[0]["c"],
+                    "Volume": data_json[0]["v"],
                 }
-            )
-            position = 0  # Reset position after selling
+                data = data.append(new_data, ignore_index=True)
 
-    # Convert trade logs to DataFrame
-    trade_logs_df = pd.DataFrame(trade_logs)
+                # Add indicators
+                data = add_indicators(data)
 
-    # Calculate summary metrics
-    total_return = (balance - initial_balance) / initial_balance
+                # Generate signal using the trained model
+                if len(data) >= 10:  # Ensure enough data for indicators
+                    signal = model.predict(
+                        data[["EMA5", "EMA9", "RSI", "VWAP"]].iloc[[-1]]
+                    )
 
-    # Calculate win rate by comparing buy and sell prices
-    win_count = 0
-    for i in range(1, len(trade_logs_df)):
-        if (
-            trade_logs_df["Action"].iloc[i] == "Sell"
-            and trade_logs_df["Action"].iloc[i - 1] == "Buy"
-        ):
-            if trade_logs_df["Price"].iloc[i] > trade_logs_df["Price"].iloc[i - 1]:
-                win_count += 1
+                    # Execute trades
+                    if signal == 1 and position == 0:  # Buy signal
+                        buy_price = data["Close"].iloc[-1]
+                        shares_bought = (
+                            balance // buy_price
+                        )  # Use all available balance
+                        if shares_bought > 0:
+                            position = shares_bought
+                            balance -= shares_bought * buy_price
+                            trade_logs.append(
+                                {
+                                    "Date": data["Date"].iloc[-1],
+                                    "Action": "Buy",
+                                    "Price": buy_price,
+                                    "Shares": shares_bought,
+                                    "Balance": balance,
+                                }
+                            )
+                            print(
+                                f"Buy {shares_bought} shares at {buy_price}. Balance: {balance}"
+                            )
+                    elif signal == 0 and position > 0:  # Sell signal
+                        sell_price = data["Close"].iloc[-1]
+                        balance += position * sell_price
+                        trade_logs.append(
+                            {
+                                "Date": data["Date"].iloc[-1],
+                                "Action": "Sell",
+                                "Price": sell_price,
+                                "Shares": position,
+                                "Balance": balance,
+                            }
+                        )
+                        print(
+                            f"Sell {position} shares at {sell_price}. Balance: {balance}"
+                        )
+                        position = 0  # Reset position after selling
 
-    total_trades = len(trade_logs_df) // 2
-    win_rate = win_count / total_trades if total_trades > 0 else 0
 
-    max_drawdown = (data["Close"].cummax() - data["Close"]).max()
-
-    summary = pd.DataFrame(
-        {
-            "Total Return": [total_return],
-            "Win Rate": [win_rate],
-            "Max Drawdown": [max_drawdown],
-        }
+# ======================
+# MAIN EXECUTION
+# ======================
+if __name__ == "__main__":
+    # Fetch and preprocess training data
+    train_data = add_indicators(
+        fetch_polygon_data(
+            TICKER, TRAIN_START_DATE, TRAIN_END_DATE, timeframe=TIMEFRAME
+        )
     )
 
-    return trade_logs_df, summary
+    # Train the model
+    model = train_model(train_data)
 
-
-# Execution
-train_data = add_indicators(
-    fetch_polygon_data(TICKER, TRAIN_START_DATE, TRAIN_END_DATE, timeframe=TIMEFRAME)
-)
-test_data = add_indicators(
-    fetch_polygon_data(TICKER, TEST_START_DATE, TEST_END_DATE, timeframe=TIMEFRAME)
-)
-
-# Train the model
-model = train_model(train_data)
-
-# Run scalping strategy with the trained model
-if model:
-    trade_logs, summary = scalping_strategy(test_data, model)
-
-    # Save trade logs and summary to Excel
-    with pd.ExcelWriter(RESULTS_FILE) as writer:
-        trade_logs.to_excel(writer, sheet_name="Trade Logs", index=False)
-        summary.to_excel(writer, sheet_name="Summary", index=False)
-    print(f"Results saved to {RESULTS_FILE}")
-else:
-    print("Scalping strategy skipped due to model training failure.")
+    if model:
+        # Start real-time trading
+        print("Starting real-time trading...")
+        asyncio.run(real_time_trading(model, TICKER))
+    else:
+        print("Real-time trading skipped due to model training failure.")

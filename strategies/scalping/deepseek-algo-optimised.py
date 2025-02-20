@@ -1,16 +1,19 @@
 import os
 import pandas as pd
 import numpy as np
-from ta.trend import EMAIndicator
+from ta.trend import EMAIndicator, MACD
 from ta.momentum import RSIIndicator
+from ta.volatility import BollingerBands
 from ta.volume import VolumeWeightedAveragePrice
 from ta.utils import dropna
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
 import requests
 from datetime import datetime, timedelta
 import time
+import asyncio
+import websockets
+import json
 
 # ======================
 # PARAMETERS & SETTINGS
@@ -18,14 +21,15 @@ import time
 API_KEY = "CTHBeNv4eb4B9eGOaDjXifsbeTV4kU4B"  # Replace with your Polygon API key
 DATA_FOLDER = "saved_data"
 RESULTS_FILE = "scalping_results.xlsx"
-TICKER = "MARA"  # Replace with a valid ticker symbol
+TICKER = "MARA"
 TRAIN_START_DATE = "2024-01-01"
 TRAIN_END_DATE = "2024-12-31"
-TEST_START_DATE = "2025-01-01"
-TEST_END_DATE = "2025-01-20"
-INITIAL_BALANCE = 1000  # Starting balance
-CHUNK_DAYS = 30  # Fetch intraday data in 30-day chunks
-TIMEFRAME = "minute"  # Use 1-minute data for scalping
+INITIAL_BALANCE = 1000
+CHUNK_DAYS = 30
+TIMEFRAME = "minute"
+
+# Stop-Loss
+STOP_LOSS_PCT = 0.01  # 1% stop-loss
 
 os.makedirs(DATA_FOLDER, exist_ok=True)
 
@@ -106,6 +110,17 @@ def add_indicators(data):
     data["VWAP"] = VolumeWeightedAveragePrice(
         data["High"], data["Low"], data["Close"], data["Volume"]
     ).volume_weighted_average_price()  # VWAP for scalping
+
+    # Add Bollinger Bands
+    bb = BollingerBands(data["Close"])
+    data["BB_High"] = bb.bollinger_hband()
+    data["BB_Low"] = bb.bollinger_lband()
+
+    # Add MACD
+    macd = MACD(data["Close"])
+    data["MACD"] = macd.macd()
+    data["MACD_Signal"] = macd.macd_signal()
+
     return data.dropna()
 
 
@@ -118,7 +133,16 @@ def train_model(data):
         return None
 
     # Define features and target
-    features = ["EMA5", "EMA9", "RSI", "VWAP"]
+    features = [
+        "EMA5",
+        "EMA9",
+        "RSI",
+        "VWAP",
+        "BB_High",
+        "BB_Low",
+        "MACD",
+        "MACD_Signal",
+    ]
     data["Target"] = np.where(
         data["Close"].shift(-1) > data["Close"], 1, 0
     )  # 1 if price increases, 0 otherwise
@@ -142,7 +166,7 @@ def train_model(data):
 
 
 # ======================
-# SCALPING STRATEGY
+# SCALPING STRATEGY WITH STOP-LOSS
 # ======================
 def scalping_strategy(data, model, initial_balance=INITIAL_BALANCE):
     if data.empty or model is None:
@@ -153,18 +177,43 @@ def scalping_strategy(data, model, initial_balance=INITIAL_BALANCE):
     balance = initial_balance
     position = 0  # Current position (number of shares held)
     trade_logs = []  # List to store trade details
+    stop_loss_price = None  # Stop-loss price for the current position
 
     # Generate signals using the trained model
-    data["Signal"] = model.predict(data[["EMA5", "EMA9", "RSI", "VWAP"]])
+    data["Signal"] = model.predict(
+        data[
+            ["EMA5", "EMA9", "RSI", "VWAP", "BB_High", "BB_Low", "MACD", "MACD_Signal"]
+        ]
+    )
 
     # Simulate trades
     for i in range(1, len(data)):
-        if data["Signal"].iloc[i] == 1 and position == 0:  # Buy signal
-            buy_price = data["Close"].iloc[i]
+        current_price = data["Close"].iloc[i]
+
+        # Check stop-loss condition
+        if position > 0 and current_price <= stop_loss_price:
+            # Sell due to stop-loss
+            balance += position * current_price
+            trade_logs.append(
+                {
+                    "Date": data.index[i],
+                    "Action": "Sell (Stop-Loss)",
+                    "Price": current_price,
+                    "Shares": position,
+                    "Balance": balance,
+                }
+            )
+            position = 0
+            stop_loss_price = None
+
+        # Buy signal
+        if data["Signal"].iloc[i] == 1 and position == 0:
+            buy_price = current_price
             shares_bought = balance // buy_price  # Use all available balance
             if shares_bought > 0:
                 position = shares_bought
                 balance -= shares_bought * buy_price
+                stop_loss_price = buy_price * (1 - STOP_LOSS_PCT)  # Set stop-loss
                 trade_logs.append(
                     {
                         "Date": data.index[i],
@@ -174,8 +223,10 @@ def scalping_strategy(data, model, initial_balance=INITIAL_BALANCE):
                         "Balance": balance,
                     }
                 )
-        elif data["Signal"].iloc[i] == 0 and position > 0:  # Sell signal
-            sell_price = data["Close"].iloc[i]
+
+        # Sell signal
+        elif data["Signal"].iloc[i] == 0 and position > 0:
+            sell_price = current_price
             balance += position * sell_price
             trade_logs.append(
                 {
@@ -186,27 +237,18 @@ def scalping_strategy(data, model, initial_balance=INITIAL_BALANCE):
                     "Balance": balance,
                 }
             )
-            position = 0  # Reset position after selling
+            position = 0
+            stop_loss_price = None
 
     # Convert trade logs to DataFrame
     trade_logs_df = pd.DataFrame(trade_logs)
 
     # Calculate summary metrics
     total_return = (balance - initial_balance) / initial_balance
-
-    # Calculate win rate by comparing buy and sell prices
-    win_count = 0
-    for i in range(1, len(trade_logs_df)):
-        if (
-            trade_logs_df["Action"].iloc[i] == "Sell"
-            and trade_logs_df["Action"].iloc[i - 1] == "Buy"
-        ):
-            if trade_logs_df["Price"].iloc[i] > trade_logs_df["Price"].iloc[i - 1]:
-                win_count += 1
-
-    total_trades = len(trade_logs_df) // 2
-    win_rate = win_count / total_trades if total_trades > 0 else 0
-
+    win_rate = (
+        trade_logs_df[trade_logs_df["Action"] == "Sell"]["Price"]
+        > trade_logs_df[trade_logs_df["Action"] == "Buy"]["Price"]
+    ).mean()
     max_drawdown = (data["Close"].cummax() - data["Close"]).max()
 
     summary = pd.DataFrame(
@@ -225,7 +267,7 @@ train_data = add_indicators(
     fetch_polygon_data(TICKER, TRAIN_START_DATE, TRAIN_END_DATE, timeframe=TIMEFRAME)
 )
 test_data = add_indicators(
-    fetch_polygon_data(TICKER, TEST_START_DATE, TEST_END_DATE, timeframe=TIMEFRAME)
+    fetch_polygon_data(TICKER, "2024-01-01", "2024-01-10", timeframe=TIMEFRAME)
 )
 
 # Train the model
