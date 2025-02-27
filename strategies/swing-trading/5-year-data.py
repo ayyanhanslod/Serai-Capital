@@ -12,10 +12,10 @@ DATA_FOLDER = "saved_data"  # Folder to save/load data
 RESULTS_FILE = "swing_trading_results.xlsx"  # Output Excel file for results
 TICKER = "MARA"  # Example stock for swing trading
 INITIAL_BALANCE = 1000  # Starting balance
-STOP_LOSS_PERCENT = 0.03  # 3% stop-loss
-TAKE_PROFIT_PERCENT = 0.06  # 6% take-profit
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
+STOP_LOSS_PERCENT = 0.02  # Tighter stop loss at 2%
+TAKE_PROFIT_PERCENT = 0.05  # More realistic take profit at 5%
+RSI_OVERBOUGHT = 75  # Slightly higher for stronger confirmation
+RSI_OVERSOLD = 25  # Slightly lower for stronger confirmation
 CHUNK_DAYS = 30  # Number of days per fetch chunk
 
 # Specify training and testing date ranges
@@ -92,44 +92,92 @@ def load_or_fetch_data(ticker, from_date, to_date):
 
 
 def add_indicators(data):
-    """Add SMA and RSI indicators"""
+    """Add enhanced technical indicators"""
+    # Keep existing indicators
     data["SMA50"] = SMAIndicator(data["Close"], window=50).sma_indicator()
     data["SMA200"] = SMAIndicator(data["Close"], window=200).sma_indicator()
     data["RSI"] = RSIIndicator(data["Close"], window=14).rsi()
+
+    # Add volume-weighted average price (VWAP)
+    data["VWAP"] = (data["Close"] * data["Volume"]).cumsum() / data["Volume"].cumsum()
+
+    # Add Average True Range for dynamic stop loss
+    data["TR"] = np.maximum(
+        data["High"] - data["Low"],
+        np.maximum(
+            abs(data["High"] - data["Close"].shift(1)),
+            abs(data["Low"] - data["Close"].shift(1)),
+        ),
+    )
+    data["ATR"] = data["TR"].rolling(window=14).mean()
+
     return data.dropna()
 
 
 def backtest_strategy(data):
-    """Backtest swing trading strategy"""
+    """Enhanced backtest strategy"""
     balance = INITIAL_BALANCE
     shares_held = 0
     entry_price = None
     trade_log = []
+    consecutive_losses = 0
+    max_consecutive_losses = 3  # Risk management
 
     for index, row in data.iterrows():
         price = row["Close"]
-        is_trending_up = row["SMA50"] > row["SMA200"]
-        is_trending_down = row["SMA50"] < row["SMA200"]
 
-        if is_trending_up and row["RSI"] < RSI_OVERSOLD and shares_held == 0:
-            shares_to_buy = int(balance // price)
-            if shares_to_buy > 0:
-                balance -= shares_to_buy * price
-                shares_held += shares_to_buy
-                entry_price = price
-                trade_log.append((index, "BUY", shares_to_buy, price, balance))
+        # Enhanced trend confirmation
+        is_trending_up = (row["SMA50"] > row["SMA200"]) and (price > row["VWAP"])
+        is_trending_down = (row["SMA50"] < row["SMA200"]) and (price < row["VWAP"])
+
+        # Position sizing based on ATR
+        position_size = min(0.02 * balance, balance)  # Risk 2% per trade
+
+        if shares_held == 0 and consecutive_losses < max_consecutive_losses:
+            # Enhanced entry conditions
+            if (
+                is_trending_up
+                and row["RSI"] < RSI_OVERSOLD
+                and row["Volume"] > data["Volume"].rolling(20).mean()
+            ):  # Volume confirmation
+
+                shares_to_buy = int(position_size // price)
+                if shares_to_buy > 0:
+                    balance -= shares_to_buy * price
+                    shares_held += shares_to_buy
+                    entry_price = price
+                    trade_log.append((index, "BUY", shares_to_buy, price, balance))
 
         if shares_held > 0:
-            stop_loss_price = entry_price * (1 - STOP_LOSS_PERCENT)
+            # Dynamic stop loss based on ATR
+            stop_loss_price = max(
+                entry_price * (1 - STOP_LOSS_PERCENT),
+                entry_price - (2 * row["ATR"]),  # 2 ATR stop loss
+            )
             take_profit_price = entry_price * (1 + TAKE_PROFIT_PERCENT)
 
-            if price <= stop_loss_price or price >= take_profit_price:
+            if price <= stop_loss_price:
+                # Stop loss hit
                 balance += shares_held * price
-                trade_log.append((index, "SELL", shares_held, price, balance))
+                trade_log.append((index, "STOP LOSS", shares_held, price, balance))
                 shares_held = 0
                 entry_price = None
+                consecutive_losses += 1
 
-            elif is_trending_down and row["RSI"] > RSI_OVERBOUGHT:
+            elif price >= take_profit_price:
+                # Take profit hit
+                balance += shares_held * price
+                trade_log.append((index, "TAKE PROFIT", shares_held, price, balance))
+                shares_held = 0
+                entry_price = None
+                consecutive_losses = 0  # Reset consecutive losses on winning trade
+
+            elif (
+                is_trending_down
+                and row["RSI"] > RSI_OVERBOUGHT
+                and row["Volume"] > data["Volume"].rolling(20).mean()
+            ):
+                # Enhanced exit conditions with volume confirmation
                 balance += shares_held * price
                 trade_log.append((index, "SELL", shares_held, price, balance))
                 shares_held = 0
