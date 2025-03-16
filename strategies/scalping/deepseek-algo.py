@@ -1,9 +1,10 @@
 import os
 import pandas as pd
 import numpy as np
-from ta.trend import EMAIndicator
-from ta.momentum import RSIIndicator
+from ta.trend import EMAIndicator, MACD
+from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volume import VolumeWeightedAveragePrice
+from ta.volatility import BollingerBands
 from ta.utils import dropna
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
@@ -26,12 +27,6 @@ TEST_END_DATE = "2025-01-20"
 INITIAL_BALANCE = 1000  # Starting balance
 CHUNK_DAYS = 30  # Fetch intraday data in 30-day chunks
 TIMEFRAME = "minute"  # Use 1-minute data for scalping
-
-# Add new parameters for strategy optimization
-PROFIT_TARGET_PCT = 0.002  # 0.2% profit target per trade
-STOP_LOSS_PCT = 0.001  # 0.1% stop loss per trade
-MAX_TRADES_PER_DAY = 10
-MIN_VOLUME_THRESHOLD = 1000  # Minimum volume for trade entry
 
 os.makedirs(DATA_FOLDER, exist_ok=True)
 
@@ -106,19 +101,26 @@ def add_indicators(data):
         return data
 
     data = dropna(data)
-    # Optimize indicators for scalping
-    data["EMA3"] = EMAIndicator(data["Close"], window=3).ema_indicator()  # Faster EMA
     data["EMA5"] = EMAIndicator(data["Close"], window=5).ema_indicator()
-    data["EMA8"] = EMAIndicator(data["Close"], window=8).ema_indicator()
-    data["RSI"] = RSIIndicator(data["Close"], window=7).rsi()  # Shorter RSI window
+    data["EMA9"] = EMAIndicator(data["Close"], window=9).ema_indicator()
+    data["RSI"] = RSIIndicator(data["Close"], window=10).rsi()
     data["VWAP"] = VolumeWeightedAveragePrice(
         data["High"], data["Low"], data["Close"], data["Volume"]
     ).volume_weighted_average_price()
 
-    # Add momentum and volatility features
-    data["Price_Change"] = data["Close"].pct_change()
-    data["Volume_Change"] = data["Volume"].pct_change()
-    data["Volatility"] = data["Close"].rolling(window=5).std()
+    # Additional indicators
+    macd = MACD(data["Close"])
+    data["MACD"] = macd.macd()
+    data["MACD_signal"] = macd.macd_signal()
+    data["MACD_hist"] = macd.macd_diff()
+
+    stoch = StochasticOscillator(data["High"], data["Low"], data["Close"])
+    data["Stoch_K"] = stoch.stoch()
+    data["Stoch_D"] = stoch.stoch_signal()
+
+    bb = BollingerBands(data["Close"])
+    data["BB_upper"] = bb.bollinger_hband()
+    data["BB_lower"] = bb.bollinger_lband()
 
     return data.dropna()
 
@@ -131,40 +133,33 @@ def train_model(data):
         print("Error: No training data available.")
         return None
 
-    # Enhanced feature engineering
+    # Updated feature list with new indicators
     features = [
-        "EMA3",
         "EMA5",
-        "EMA8",
+        "EMA9",
         "RSI",
         "VWAP",
-        "Price_Change",
-        "Volume_Change",
-        "Volatility",
+        "MACD",
+        "MACD_signal",
+        "MACD_hist",
+        "Stoch_K",
+        "Stoch_D",
+        "BB_upper",
+        "BB_lower",
     ]
-
-    # Create more sophisticated target variable
-    data["Target"] = (data["Close"].shift(-1) > data["Close"]).astype(int)
-    data["Return"] = data["Close"].pct_change().shift(-1)
-    # Only consider significant moves as signals
-    data.loc[abs(data["Return"]) < 0.001, "Target"] = 0
-
+    data["Target"] = np.where(data["Close"].shift(-1) > data["Close"], 1, 0)
     data.dropna(inplace=True)
 
+    # Split data into training and validation sets
     X_train, X_val, y_train, y_val = train_test_split(
         data[features], data["Target"], test_size=0.2, random_state=42
     )
 
-    # Use more trees and better parameters
-    model = RandomForestClassifier(
-        n_estimators=200,
-        max_depth=10,
-        min_samples_split=10,
-        min_samples_leaf=5,
-        random_state=42,
-    )
+    # Train RandomForestClassifier
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X_train, y_train)
 
+    # Evaluate model
     val_predictions = model.predict(X_val)
     accuracy = accuracy_score(y_val, val_predictions)
     print(f"Validation Accuracy: {accuracy * 100:.2f}%")
@@ -180,146 +175,95 @@ def scalping_strategy(data, model, initial_balance=INITIAL_BALANCE):
         print("Error: No data or model available for scalping.")
         return pd.DataFrame(), pd.DataFrame()
 
+    # Initialize variables
     balance = initial_balance
     position = 0
     trade_logs = []
-    daily_trades = 0
-    last_trade_date = None
-    entry_price = None
 
-    # Generate prediction probabilities instead of just signals
-    probabilities = model.predict_proba(
+    # Risk management parameters
+    max_loss_percent = 0.01
+    take_profit_percent = 0.02
+
+    # Generate signals using the trained model
+    data["Signal"] = model.predict(
         data[
             [
-                "EMA3",
                 "EMA5",
-                "EMA8",
+                "EMA9",
                 "RSI",
                 "VWAP",
-                "Price_Change",
-                "Volume_Change",
-                "Volatility",
+                "MACD",
+                "MACD_signal",
+                "MACD_hist",
+                "Stoch_K",
+                "Stoch_D",
+                "BB_upper",
+                "BB_lower",
             ]
         ]
     )
-    data["Buy_Probability"] = probabilities[:, 1]
-
-    # Pre-process dates to ensure we handle them consistently
-    current_date = None
 
     for i in range(1, len(data)):
-        current_time = data.index[i]
-
-        # Check if we've moved to a new day
-        if current_date != current_time.date():
-            current_date = current_time.date()
-            daily_trades = 0  # Reset counter at the start of each new day
-
-        # Skip if we've hit the daily trade limit
-        if daily_trades >= MAX_TRADES_PER_DAY:
-            continue
-
         current_price = data["Close"].iloc[i]
 
-        # Enhanced entry conditions
-        if position == 0:
-            if (
-                data["Buy_Probability"].iloc[i] > 0.75  # Strong buy signal
-                and data["Volume"].iloc[i] > MIN_VOLUME_THRESHOLD
-                and data["EMA3"].iloc[i] > data["EMA8"].iloc[i]
-                and data["RSI"].iloc[i] < 70
-                and daily_trades < MAX_TRADES_PER_DAY
-            ):
-
-                risk_amount = balance * 0.01  # Risk 1% per trade
-                position_size = risk_amount / (current_price * STOP_LOSS_PCT)
-                shares_to_buy = min(int(position_size), int(balance // current_price))
-
-                if shares_to_buy > 0:
-                    position = shares_to_buy
-                    entry_price = current_price
-                    balance -= position * current_price
-                    daily_trades += 1
-
-                    trade_logs.append(
-                        {
-                            "Date": current_time,
-                            "Action": "Buy",
-                            "Price": current_price,
-                            "Shares": position,
-                            "Balance": balance,
-                            "Signal_Strength": data["Buy_Probability"].iloc[i],
-                        }
-                    )
-
-        # Enhanced exit conditions
-        elif position > 0:
-            profit_pct = (current_price - entry_price) / entry_price
-
-            # Exit conditions
-            should_exit = (
-                profit_pct <= -STOP_LOSS_PCT  # Stop loss
-                or profit_pct >= PROFIT_TARGET_PCT  # Take profit
-                or (
-                    data["Buy_Probability"].iloc[i] < 0.3 and profit_pct > 0
-                )  # Exit on weak signal
-            )
-
-            if should_exit:
-                balance += position * current_price
-                exit_type = (
-                    "Stop Loss"
-                    if profit_pct <= -STOP_LOSS_PCT
-                    else (
-                        "Take Profit"
-                        if profit_pct >= PROFIT_TARGET_PCT
-                        else "Signal Exit"
-                    )
-                )
-
+        # Buy signal
+        if data["Signal"].iloc[i] == 1 and position == 0:
+            buy_price = current_price
+            shares_bought = balance // buy_price
+            if shares_bought > 0:
+                position = shares_bought
+                balance -= shares_bought * buy_price
                 trade_logs.append(
                     {
-                        "Date": current_time,
-                        "Action": exit_type,
-                        "Price": current_price,
-                        "Shares": position,
+                        "Date": data.index[i],
+                        "Action": "Buy",
+                        "Price": buy_price,
+                        "Shares": shares_bought,
                         "Balance": balance,
-                        "Profit_Pct": profit_pct * 100,
                     }
                 )
 
-                position = 0
-                entry_price = None
+        # Sell signal
+        elif data["Signal"].iloc[i] == 0 and position > 0:
+            sell_price = current_price
+            balance += position * sell_price
+            trade_logs.append(
+                {
+                    "Date": data.index[i],
+                    "Action": "Sell",
+                    "Price": sell_price,
+                    "Shares": position,
+                    "Balance": balance,
+                }
+            )
+            position = 0
 
-    # Create detailed trade log
+    # Convert trade logs to DataFrame
     trade_logs_df = pd.DataFrame(trade_logs)
 
-    # Calculate enhanced summary metrics
-    if not trade_logs_df.empty:
-        profitable_trades = trade_logs_df[
-            trade_logs_df["Action"].isin(["Take Profit", "Signal Exit"])
-        ]
-        total_trades = (
-            len(trade_logs_df) // 2
-        )  # Divide by 2 since each trade has entry and exit
-        win_rate = len(profitable_trades) / total_trades if total_trades > 0 else 0
-        avg_profit_pct = (
-            profitable_trades["Profit_Pct"].mean() if not profitable_trades.empty else 0
-        )
-        max_drawdown = (data["Close"].cummax() - data["Close"]).max()
+    # Calculate summary metrics
+    total_return = (balance - initial_balance) / initial_balance
+    win_count = 0
+    for i in range(1, len(trade_logs_df)):
+        if (
+            trade_logs_df["Action"].iloc[i] == "Sell"
+            and trade_logs_df["Action"].iloc[i - 1] == "Buy"
+        ):
+            if trade_logs_df["Price"].iloc[i] > trade_logs_df["Price"].iloc[i - 1]:
+                win_count += 1
 
-        summary = pd.DataFrame(
-            {
-                "Total Return": [(balance - initial_balance) / initial_balance],
-                "Win Rate": [win_rate],
-                "Average Profit %": [avg_profit_pct],
-                "Max Drawdown": [max_drawdown],
-                "Total Trades": [total_trades],
-                "Profitable Trades": [len(profitable_trades)],
-            }
-        )
-    else:
-        summary = pd.DataFrame()
+    total_trades = len(trade_logs_df) // 2
+    win_rate = win_count / total_trades if total_trades > 0 else 0
+
+    max_drawdown = (data["Close"].cummax() - data["Close"]).max()
+
+    summary = pd.DataFrame(
+        {
+            "Total Return": [total_return],
+            "Win Rate": [win_rate],
+            "Max Drawdown": [max_drawdown],
+        }
+    )
 
     return trade_logs_df, summary
 
@@ -339,20 +283,10 @@ model = train_model(train_data)
 if model:
     trade_logs, summary = scalping_strategy(test_data, model)
 
-    # Ensure we have data before writing to Excel
-    if not trade_logs.empty or not summary.empty:
-        # Create a new Excel writer object
-        with pd.ExcelWriter(RESULTS_FILE, engine="openpyxl") as writer:
-            # Write trade logs if we have any
-            if not trade_logs.empty:
-                trade_logs.to_excel(writer, sheet_name="Trade Logs", index=True)
-
-            # Write summary if we have any
-            if not summary.empty:
-                summary.to_excel(writer, sheet_name="Summary", index=True)
-
-        print(f"Results successfully saved to {RESULTS_FILE}")
-    else:
-        print("No trades were executed during the test period.")
+    # Save trade logs and summary to Excel
+    with pd.ExcelWriter(RESULTS_FILE) as writer:
+        trade_logs.to_excel(writer, sheet_name="Trade Logs", index=False)
+        summary.to_excel(writer, sheet_name="Summary", index=False)
+    print(f"Results saved to {RESULTS_FILE}")
 else:
     print("Scalping strategy skipped due to model training failure.")
