@@ -238,11 +238,26 @@ def scalping_strategy(data, model, initial_balance=INITIAL_BALANCE):
             )
             position = 0
 
+    # Close any open position at the end of the trading period
+    if position > 0:
+        final_price = data["Close"].iloc[-1]
+        balance += position * final_price
+        trade_logs.append(
+            {
+                "Date": data.index[-1],
+                "Action": "Sell",
+                "Price": final_price,
+                "Shares": position,
+                "Balance": balance,
+            }
+        )
+        position = 0
+
     # Convert trade logs to DataFrame
     trade_logs_df = pd.DataFrame(trade_logs)
 
     # Calculate summary metrics
-    total_return = (balance - initial_balance) / initial_balance
+    total_return = str(((balance - initial_balance) / initial_balance) * 100) + "%"
     win_count = 0
     for i in range(1, len(trade_logs_df)):
         if (
